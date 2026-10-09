@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+# Launcher: runs stk from anywhere, e.g.  stk quote RELIANCE
+DIR="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+PYTHONPATH="$DIR${PYTHONPATH:+:$PYTHONPATH}" exec python -m screener "$@"
