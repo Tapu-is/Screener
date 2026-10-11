@@ -12,7 +12,6 @@ if command -v pkg >/dev/null 2>&1; then
 fi
 
 echo "==> Installing Python packages"
-python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 
 DIR="$(pwd)"

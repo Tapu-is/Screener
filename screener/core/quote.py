@@ -14,17 +14,24 @@ RELIANCE.BO     -> used exactly as given
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+
+from urllib.parse import quote as urlquote
 
 import requests
 
 from . import cache
 
 IST = timezone(timedelta(hours=5, minutes=30))
-CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+DEFAULT_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+# Yahoo refuses browser-style User-Agents sent by non-browser clients (HTTP 429)
+# but accepts this plain one. Found with `stk probe`.
+YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0"}
+# Browser-style headers, used for the NSE / niftyindices symbol list download.
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 "
@@ -154,12 +161,18 @@ def parse_chart(payload: dict, symbol: str) -> Quote:
 
 
 # ------------------------------------------------------------------- fetching
+def chart_url(ticker: str) -> str:
+    """Chart endpoint for a ticker. STK_CHART_URL overrides the host (used by tests)."""
+    template = os.environ.get("STK_CHART_URL", DEFAULT_CHART_URL)
+    return template.format(symbol=urlquote(ticker, safe="^"))
+
+
 def _fetch(ticker: str) -> Quote:
     try:
         resp = requests.get(
-            CHART_URL.format(symbol=ticker),
+            chart_url(ticker),
             params={"interval": "1d", "range": "5d"},
-            headers=HEADERS,
+            headers=YAHOO_HEADERS,
             timeout=TIMEOUT,
         )
     except requests.RequestException as exc:

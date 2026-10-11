@@ -87,6 +87,13 @@ class SymbolTests(unittest.TestCase):
             quote.candidates("  ")
 
 
+class HeaderTests(unittest.TestCase):
+    def test_quote_request_uses_accepted_user_agent(self):
+        with mock.patch("requests.get", return_value=FakeResp(200, SAMPLE)) as g:
+            quote.get_quote("RELIANCE", use_cache=False)
+        self.assertEqual(g.call_args.kwargs["headers"]["User-Agent"], "Mozilla/5.0")
+
+
 class MarketHoursTests(unittest.TestCase):
     def at(self, y, m, d, h, mi):
         return datetime(y, m, d, h, mi, tzinfo=IST)
