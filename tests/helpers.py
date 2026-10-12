@@ -87,3 +87,31 @@ class FakeFetch:
         if start is not None:
             rows = [r for r in rows if r[0] >= start.isoformat()]
         return HistoryResult(ticker=ticker, rows=list(rows), splits=list(self.splits.get(ticker, [])))
+
+
+def mk_rows(closes, vols=None, end=None):
+    """Price rows (date, open, high, low, close, adj_close, volume) ending on `end`."""
+    from datetime import date as _date
+
+    end = end or _date(2026, 10, 9)
+    days = business_days(end, len(closes))
+    out = []
+    for i, (d, c) in enumerate(zip(days, closes)):
+        v = vols[i] if vols else 1_000_000
+        out.append((d.isoformat(), c, round(c * 1.01, 4), round(c * 0.99, 4), c, c, v))
+    return out
+
+
+def add_stock(conn, ticker, closes, vols=None, industry="Test", name=None, end=None):
+    """Insert a symbol with prices; returns its id."""
+    from screener.core import updater
+
+    with conn:
+        conn.execute(
+            "INSERT INTO symbols (ticker, yahoo, name, industry, exchange, active, added_at) "
+            "VALUES (?, ?, ?, ?, 'NSE', 1, '2026-10-09')",
+            (ticker, f"{ticker}.NS", name or f"{ticker} Ltd", industry),
+        )
+    sid = conn.execute("SELECT id FROM symbols WHERE ticker = ?", (ticker,)).fetchone()[0]
+    updater.store_rows(conn, sid, mk_rows(closes, vols, end))
+    return sid

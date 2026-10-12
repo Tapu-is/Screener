@@ -11,7 +11,7 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS symbols (
@@ -41,6 +41,45 @@ CREATE TABLE IF NOT EXISTS prices_daily (
 CREATE TABLE IF NOT EXISTS watchlist (
     ticker   TEXT PRIMARY KEY,
     added_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS indicators (
+    symbol_id            INTEGER PRIMARY KEY REFERENCES symbols(id) ON DELETE CASCADE,
+    as_of                TEXT NOT NULL,      -- date of the latest price used
+    computed_at          TEXT NOT NULL,
+    sessions             INTEGER,
+    close                REAL,
+    volume               INTEGER,
+    chg_1d               REAL,
+    chg_1w               REAL,
+    chg_1m               REAL,
+    chg_6m               REAL,
+    chg_1y               REAL,
+    rsi14                REAL,
+    sma20                REAL,
+    sma50                REAL,
+    sma200               REAL,
+    macd                 REAL,
+    macd_signal          REAL,
+    macd_hist            REAL,
+    macd_cross_up_days   INTEGER,
+    macd_cross_down_days INTEGER,
+    golden_cross_days    INTEGER,
+    death_cross_days     INTEGER,
+    high52               REAL,
+    low52                REAL,
+    prior_high52         REAL,
+    from_high_pct        REAL,
+    from_low_pct         REAL,
+    avg_vol20            REAL,
+    vol_ratio            REAL,
+    turnover20_cr        REAL
+);
+
+CREATE TABLE IF NOT EXISTS saved_screens (
+    name       TEXT PRIMARY KEY,
+    definition TEXT NOT NULL,                -- JSON
+    created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS update_log (
@@ -87,10 +126,19 @@ def connect(path: Optional[os.PathLike] = None) -> sqlite3.Connection:
     return conn
 
 
+def _add_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 def migrate(conn: sqlite3.Connection) -> None:
+    """Bring an existing database up to the current schema, keeping its data."""
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version >= SCHEMA_VERSION:
         return
-    conn.executescript(SCHEMA)
+    conn.executescript(SCHEMA)  # only creates what is missing
+    # v2: symbols Yahoo says do not exist are remembered so updates skip them
+    _add_column(conn, "symbols", "no_data_since", "TEXT")
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()

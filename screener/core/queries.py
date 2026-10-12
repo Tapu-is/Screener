@@ -148,9 +148,15 @@ def status(conn: sqlite3.Connection, now: Optional[datetime] = None) -> dict:
     active = one("SELECT COUNT(*) FROM symbols WHERE active = 1")
     with_data = one("SELECT COUNT(DISTINCT symbol_id) FROM prices_daily")
     behind = one(
-        """SELECT COUNT(*) FROM symbols s WHERE s.active = 1 AND
+        """SELECT COUNT(*) FROM symbols s WHERE s.active = 1 AND s.no_data_since IS NULL AND
            COALESCE((SELECT MAX(date) FROM prices_daily p WHERE p.symbol_id = s.id), '') < ?""",
         target,
+    )
+    stale = one(
+        """SELECT COUNT(*) FROM (SELECT symbol_id, MAX(date) AS d FROM prices_daily GROUP BY symbol_id) m
+           JOIN symbols s ON s.id = m.symbol_id AND s.active = 1
+           LEFT JOIN indicators i ON i.symbol_id = m.symbol_id
+           WHERE i.symbol_id IS NULL OR i.as_of < m.d"""
     )
     last_log = conn.execute("SELECT * FROM update_log ORDER BY id DESC LIMIT 1").fetchone()
     path = conn.execute("PRAGMA database_list").fetchone()["file"]
@@ -164,6 +170,8 @@ def status(conn: sqlite3.Connection, now: Optional[datetime] = None) -> dict:
         "latest_date": one("SELECT MAX(date) FROM prices_daily"),
         "expected_date": target,
         "behind": behind,
+        "unavailable": one("SELECT COUNT(*) FROM symbols WHERE active = 1 AND no_data_since IS NOT NULL"),
+        "indicators_stale": stale,
         "watchlist": one("SELECT COUNT(*) FROM watchlist"),
         "last_update": dict(last_log) | {"failures": json.loads(last_log["failures"] or "[]")} if last_log else None,
     }

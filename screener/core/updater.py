@@ -36,13 +36,14 @@ from typing import Callable, Optional
 
 import requests
 
-from .history import HistoryError, HistoryResult, RateLimited, fetch_history
+from .history import HistoryError, HistoryResult, NotFound, RateLimited, fetch_history
 from .quote import IST
 
 OVERLAP_DAYS = 7
 CLOSE_BUFFER = (15, 45)  # a session counts as finished after 15:45 IST
 ABORT_STREAK = 3  # stop after this many transient failures in a row
 DEFAULT_DELAY = 0.8  # seconds between requests
+UNAVAILABLE_RETRY_DAYS = 30  # symbols the source does not know are re-checked this often
 
 
 # ----------------------------------------------------------------- trading days
@@ -146,6 +147,13 @@ def paced(fetch: Callable, pacer: Pacer) -> Callable:
     return inner
 
 
+def _recent(day: str, now: datetime) -> bool:
+    try:
+        return (now.date() - date.fromisoformat(day)).days < UNAVAILABLE_RETRY_DAYS
+    except ValueError:
+        return False
+
+
 # ----------------------------------------------------------------------- storage
 def store_rows(conn: sqlite3.Connection, symbol_id: int, rows: list[tuple], replace_all: bool = False) -> int:
     with conn:
@@ -171,6 +179,9 @@ class UpdateResult:
     interrupted: bool = False
     aborted: str = ""  # "" | "rate_limit" | "network"
     not_done: int = 0  # symbols left untried or unfinished after an early stop
+    unavailable: list = field(default_factory=list)  # tickers the source does not know (newly found)
+    unavailable_skipped: int = 0  # previously found unknown, not asked about again
+    updated_ids: list = field(default_factory=list)  # symbol ids that got new price rows
     started: str = ""
     finished: str = ""
 
@@ -186,13 +197,14 @@ def update(
     fetch: Callable = fetch_history,
     delay: float = DEFAULT_DELAY,
     pacer: Optional[Pacer] = None,
+    retry_unavailable: bool = False,
 ) -> UpdateResult:
     now = _now(now)
     result = UpdateResult(started=now.isoformat(timespec="seconds"))
     pacer = pacer or Pacer(interval=delay)
     fetch = paced(fetch, pacer)
 
-    sql = "SELECT id, ticker, yahoo FROM symbols WHERE active = 1"
+    sql = "SELECT id, ticker, yahoo, no_data_since FROM symbols WHERE active = 1"
     params: list = []
     if tickers:
         marks = ",".join("?" * len(tickers))
@@ -209,10 +221,17 @@ def update(
     drop_today = today_is_incomplete(now)
     today_iso = now.date().isoformat()
 
+    recheck = retry_unavailable or bool(tickers)  # naming a symbol always retries it
     todo = []
     done = 0
     for s in symbols:
         last = last_dates.get(s["id"])
+        if not last and s["no_data_since"] and not recheck and _recent(s["no_data_since"], now):
+            result.unavailable_skipped += 1
+            done += 1
+            if progress:
+                progress(done, result.total, s["ticker"])
+            continue
         if not full and last and date.fromisoformat(last) >= target:
             result.skipped += 1
             done += 1
@@ -251,11 +270,23 @@ def update(
                 elif replace_all:
                     raise HistoryError(f'{s["ticker"]}: no price history returned')
                 result.ok += 1
+                if rows:
+                    result.updated_ids.append(s["id"])
+                if s["no_data_since"]:  # the source knows it again
+                    with conn:
+                        conn.execute("UPDATE symbols SET no_data_since = NULL WHERE id = ?", (s["id"],))
                 # isolated blips before this success were real, individual failures
                 result.failures.extend((t, m) for t, m, _ in streak)
                 streak.clear()
             except Stopped:
                 continue
+            except NotFound as exc:
+                if last_dates.get(s["id"]):  # had prices before: odd, so report it normally
+                    result.failures.append((s["ticker"], str(exc)))
+                else:
+                    with conn:
+                        conn.execute("UPDATE symbols SET no_data_since = ? WHERE id = ?", (today_iso, s["id"]))
+                    result.unavailable.append(s["ticker"])
             except HistoryError as exc:
                 if exc.transient:
                     streak.append((s["ticker"], str(exc), isinstance(exc, RateLimited)))
@@ -283,7 +314,15 @@ def update(
         result.failures.extend((t, m) for t, m, _ in streak)  # run ended on isolated failures
         streak.clear()
 
-    result.not_done = max(result.total - result.skipped - result.ok - len(result.failures), 0)
+    result.not_done = max(
+        result.total
+        - result.skipped
+        - result.unavailable_skipped
+        - len(result.unavailable)
+        - result.ok
+        - len(result.failures),
+        0,
+    )
     result.finished = datetime.now(IST).isoformat(timespec="seconds")
     _log(conn, result, "full" if full else "update")
     return result

@@ -5,7 +5,9 @@
     stk status                    what is stored, and how fresh it is
     stk quote RELIANCE            latest price (live, a few minutes delayed)
     stk history RELIANCE -d 30    stored daily prices
-    stk info RELIANCE             52-week range, returns, volume
+    stk info RELIANCE             52-week range, returns, RSI, trend, volume
+    stk screen                    list screens; `stk screen oversold` runs one
+    stk screen --rsi-below 30 --above-sma 200     your own filters
     stk find tata                 search symbols and company names
     stk watch add TCS INFY        manage the watchlist; `stk watch` shows prices
     stk doctor                    check setup and connectivity
@@ -14,6 +16,8 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import json
 import sqlite3
 import sys
 import time
@@ -29,7 +33,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .. import __version__
-from ..core import db, probe, queries, symbols, updater
+from ..core import db, indicators, probe, queries, screens, symbols, updater
 from ..core.quote import IST, YAHOO_HEADERS, Quote, QuoteError, get_quotes, is_market_open
 
 console = Console()
@@ -262,14 +266,22 @@ def cmd_update(args: argparse.Namespace) -> int:
             workers=args.workers,
             delay=args.delay,
             progress=on_progress,
+            retry_unavailable=args.retry_missing,
         )
 
     secs = (datetime.fromisoformat(result.finished) - datetime.fromisoformat(result.started)).total_seconds()
     left = f" · left {result.not_done}" if result.not_done else ""
+    unavailable = len(result.unavailable) + result.unavailable_skipped
+    gone = f" · not on Yahoo {unavailable}" if unavailable else ""
     console.print(
         f"[green]✓[/green] updated {result.ok} · already current {result.skipped} · "
-        f"failed {len(result.failures)}{left} · {result.rows:,} rows · {secs:.0f}s"
+        f"failed {len(result.failures)}{left}{gone} · {result.rows:,} rows · {secs:.0f}s"
     )
+    if result.unavailable:
+        console.print(
+            f"[dim]Yahoo has no data for: {', '.join(result.unavailable)}. "
+            "They won't be asked about again for 30 days (or use --retry-missing).[/dim]"
+        )
     for ticker, msg in result.failures[:5]:
         console.print(f"  [red]✗[/red] {msg}")
     if len(result.failures) > 5:
@@ -279,6 +291,9 @@ def cmd_update(args: argparse.Namespace) -> int:
 
     if result.interrupted:
         console.print("[yellow]Stopped early. Progress is saved; run stk update to continue.[/yellow]")
+
+    _refresh_indicators(conn, result.updated_ids)
+
     if result.aborted == "rate_limit":
         console.print(
             "\n[yellow]The data source (Yahoo) is limiting requests from this connection (HTTP 429), "
@@ -303,6 +318,18 @@ def cmd_update(args: argparse.Namespace) -> int:
     return 0
 
 
+def _refresh_indicators(conn: sqlite3.Connection, extra_ids=()) -> int:
+    """Recalculate indicators for stocks with new prices and any that are stale."""
+    ids = set(extra_ids) | set(indicators.stale_symbol_ids(conn))
+    if not ids:
+        return 0
+    if len(ids) > 20:
+        console.print(f"Calculating indicators for {len(ids)} stocks...")
+    n = indicators.refresh(conn, ids)
+    console.print(f"[green]✓[/green] indicators ready for {n} stocks")
+    return n
+
+
 def cmd_status(_: argparse.Namespace) -> int:
     conn = db.connect()
     s = queries.status(conn)
@@ -315,6 +342,8 @@ def cmd_status(_: argparse.Namespace) -> int:
     t.add_column()
     t.add_row("Database", f'{s["path"]} ({_size(s["size_bytes"])})')
     t.add_row("Symbols", f'{s["symbols"]} ({s["with_data"]} with prices)')
+    if s["unavailable"]:
+        t.add_row("Not on Yahoo", f'{s["unavailable"]} (skipped on update)')
     t.add_row("Price rows", f'{s["price_rows"]:,}')
     if s["latest_date"]:
         t.add_row("Data range", f'{_date(s["first_date"])} to {_date(s["latest_date"])}')
@@ -326,6 +355,11 @@ def cmd_status(_: argparse.Namespace) -> int:
         t.add_row("Freshness", fresh)
     else:
         t.add_row("Freshness", "[yellow]no prices yet[/yellow] - run stk update")
+    if s["with_data"]:
+        if s["indicators_stale"] == 0:
+            t.add_row("Indicators", "[green]✓ up to date[/green]")
+        else:
+            t.add_row("Indicators", f'[yellow]{s["indicators_stale"]} to recalculate[/yellow] - run stk update')
     t.add_row("Watchlist", str(s["watchlist"]))
     lu = s["last_update"]
     if lu:
@@ -416,6 +450,34 @@ def cmd_find(args: argparse.Namespace) -> int:
     return 0
 
 
+def _ago(days: int) -> str:
+    return "today" if days == 0 else f"{days}d ago"
+
+
+def _trend_text(ind: dict) -> str:
+    above = None
+    if ind.get("sma50") and ind.get("sma200"):
+        above = ind["sma50"] > ind["sma200"]
+    state = "50d above 200d" if above else "50d below 200d" if above is not None else ""
+    if ind.get("golden_cross_days") is not None:
+        return f'golden cross {_ago(ind["golden_cross_days"])}' + (f" ({state})" if state else "")
+    if ind.get("death_cross_days") is not None:
+        return f'death cross {_ago(ind["death_cross_days"])}' + (f" ({state})" if state else "")
+    return state
+
+
+def _macd_text(ind: dict) -> str:
+    hist = ind.get("macd_hist")
+    if hist is None:
+        return ""
+    text = "bullish" if hist > 0 else "bearish"
+    if ind.get("macd_cross_up_days") is not None:
+        text += f', crossed up {_ago(ind["macd_cross_up_days"])}'
+    elif ind.get("macd_cross_down_days") is not None:
+        text += f', crossed down {_ago(ind["macd_cross_down_days"])}'
+    return text
+
+
 def cmd_info(args: argparse.Namespace) -> int:
     conn = db.connect()
     sym = _need_symbol(conn, args.symbol)
@@ -438,9 +500,25 @@ def cmd_info(args: argparse.Namespace) -> int:
     t.add_row("In range", f"{_bar(st.range_pos)} {st.range_pos * 100:.0f}%")
     t.add_row("From high", _pct(st.from_high_pct))
     t.add_row("From low", _pct(st.from_low_pct))
-    if st.avg_vol20:
-        ratio = (st.last_vol or 0) / st.avg_vol20
-        t.add_row("Volume", f"{_volume(st.last_vol)} ({ratio:.1f}x 20d avg)")
+    ind = indicators.compute_symbol(conn, sym["id"])
+    if ind:
+        t.add_row("", "")
+        rsi = ind["rsi14"]
+        if rsi is not None:
+            tag = " (oversold)" if rsi < 30 else " (overbought)" if rsi > 70 else ""
+            t.add_row("RSI (14)", f"{rsi:.1f}{tag}")
+        for n in (50, 200):
+            avg = ind[f"sma{n}"]
+            if avg:
+                t.add_row(f"vs {n}-day avg", _pct((ind["close"] / avg - 1) * 100))
+        trend = _trend_text(ind)
+        if trend:
+            t.add_row("Trend", trend)
+        macd = _macd_text(ind)
+        if macd:
+            t.add_row("MACD", macd)
+        if ind["vol_ratio"] is not None:
+            t.add_row("Volume", f'{_volume(ind["volume"])} ({ind["vol_ratio"]:.1f}x avg)')
 
     title = f'[bold]{sym["ticker"]}[/bold]  {sym["name"] or ""}'
     console.print(Panel(t, title=title, subtitle=sym["industry"] or None, box=box.ROUNDED, expand=False))
@@ -524,6 +602,179 @@ def cmd_doctor(_: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+# ------------------------------------------------------------- screen command
+def _fmt_field(name: str, v) -> Text:
+    if v is None:
+        return Text("-", style="dim")
+    kind = indicators.FIELD_BY_NAME[name].kind
+    if kind == "pct":
+        return Text(f"{v:+.1f}%", style="green" if v >= 0 else "red")
+    if kind == "price":
+        return Text(f"{v:,.1f}")
+    if kind == "rsi":
+        return Text(f"{v:.1f}")
+    if kind == "macd":
+        return Text(f"{v:+.3f}")
+    if kind == "ratio":
+        return Text(f"{v:.1f}x")
+    if kind == "days":
+        return Text(f"{int(v)}d")
+    if kind == "cr":
+        return Text(f"{v:,.1f}Cr" if v < 10 else f"{v:,.0f}Cr")
+    if kind == "int":
+        return Text(_volume(v) if name in ("volume", "avg_vol20") else f"{int(v):,}")
+    return Text(str(v))
+
+
+def render_screen(res: screens.ScreenResult, show_names: bool = False) -> Table:
+    t = Table(box=box.SIMPLE_HEAD, header_style="bold", pad_edge=False)
+    t.add_column("Symbol")
+    if show_names:
+        t.add_column("Name", no_wrap=True, overflow="ellipsis", max_width=16)
+    t.add_column("Close", justify="right")
+    for f in res.show:
+        t.add_column(indicators.FIELD_BY_NAME[f].short, justify="right")
+    for r in res.rows:
+        cells = [r["ticker"]]
+        if show_names:
+            cells.append(r["name"] or "-")
+        cells.append(_fmt_field("close", r["close"]))
+        cells += [_fmt_field(f, r.get(f)) for f in res.show]
+        t.add_row(*cells)
+    return t
+
+
+def _screen_list(conn: sqlite3.Connection) -> int:
+    t = Table(box=box.SIMPLE_HEAD, header_style="bold", pad_edge=False)
+    t.add_column("Screen")
+    t.add_column("Finds")
+    for it in screens.list_all(conn):
+        t.add_row(it["name"] + ("*" if it["source"] == "saved" else ""), it["description"])
+    console.print(t)
+    console.print("[dim]* = your saved screens. Screens flag candidates from end-of-day data; not advice.[/dim]")
+    console.print("Run one:   [bold]stk screen oversold[/bold]")
+    console.print("Your own:  [bold]stk screen --rsi-below 30 --above-sma 200[/bold]")
+    console.print("Save it:   [bold]stk screen save mine --rsi-below 30 --above-sma 200[/bold]")
+    console.print("Fields:    [bold]stk screen fields[/bold]")
+    return 0
+
+
+def _screen_fields() -> int:
+    t = Table(box=box.SIMPLE_HEAD, header_style="bold", pad_edge=False)
+    t.add_column("Field")
+    t.add_column("Meaning")
+    for f in indicators.FIELDS:
+        t.add_row(f.name, f.help)
+    t.add_row("ticker, name, industry", "Text. Match part of it with ~, e.g. industry~bank")
+    console.print(t)
+    console.print("Use with [bold]--where[/bold], for example:")
+    console.print('  stk screen --where "rsi14<35" --where "close>sma200" --where "vol_ratio>=1.5"')
+    console.print('  stk screen --where "close>sma50*1.05" --industry bank')
+    return 0
+
+
+def _screen_csv(path: str, res: screens.ScreenResult) -> str:
+    out = Path(path).expanduser()
+    cols = ["ticker", "name", "industry"] + indicators.COLUMNS
+    with out.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(cols)
+        for r in res.all_rows:
+            w.writerow([r.get(c) for c in cols])
+    return str(out)
+
+
+def _screen(conn: sqlite3.Connection, args: argparse.Namespace) -> int:
+    words = list(args.words or [])
+    action = words[0].lower() if words and words[0].lower() in screens.RESERVED else None
+    extra = screens.conditions_from_options(
+        rsi_below=args.rsi_below,
+        rsi_above=args.rsi_above,
+        above_sma=args.above_sma,
+        below_sma=args.below_sma,
+        min_volume_ratio=args.min_volume_ratio,
+        min_turnover=args.min_turnover,
+        industry=args.industry,
+        where=args.where,
+    )
+    order = "asc" if args.asc else "desc" if args.desc else None
+
+    if action == "fields":
+        return _screen_fields()
+    if action == "list" or (not words and not extra):
+        return _screen_list(conn)
+
+    if action in ("show", "delete", "save"):
+        if len(words) != 2:
+            console.print(f"Usage: stk screen {action} NAME" + (" [filters]" if action == "save" else ""))
+            return 1
+        name = words[1]
+        if action == "delete":
+            if screens.delete(conn, name):
+                console.print(f"[green]✓[/green] deleted {name.lower()}")
+                return 0
+            console.print(f'No saved screen called "{name}".')
+            return 1
+        if action == "show":
+            defn, source = screens.get(conn, name)
+            console.print(f"[bold]{name.lower()}[/bold] ({source})")
+            if defn.get("description"):
+                console.print(defn["description"])
+            console.print(f"Conditions: {screens.describe(defn)}")
+            console.print(json.dumps(defn, indent=2), markup=False, highlight=False)
+            return 0
+        if not extra:
+            console.print("Add some filters to save, for example:")
+            console.print(f"  [bold]stk screen save {name.lower()} --rsi-below 30 --above-sma 200[/bold]")
+            return 1
+        defn = screens.merge(None, extra, sort=args.sort, order=order, limit=args.limit)
+        verb = screens.save(conn, name, defn)
+        console.print(f"[green]✓[/green] {verb} screen [bold]{name.lower()}[/bold]: {screens.describe(defn)}")
+        console.print(f"Run it with: [bold]stk screen {name.lower()}[/bold]")
+        return 0
+
+    base, title = None, "custom screen"
+    if words:
+        if len(words) > 1:
+            raise screens.ScreenError("Give one screen name, for example: stk screen oversold")
+        base, _source = screens.get(conn, words[0])
+        title = words[0].lower()
+    defn = screens.merge(base, extra, sort=args.sort, order=order, limit=args.limit)
+    screens.validate(defn)
+
+    if conn.execute("SELECT 1 FROM prices_daily LIMIT 1").fetchone() is None:
+        console.print("No prices stored yet. Run [bold]stk init[/bold], then [bold]stk update[/bold].")
+        return 1
+    _refresh_indicators(conn)
+    res = screens.run(conn, defn)
+
+    head = f"[bold]{title}[/bold] · {res.total} match" + ("" if res.total == 1 else "es")
+    if res.as_of:
+        head += f" · data to {_date(res.as_of)}"
+    console.print(head)
+    console.print(f"[dim]{screens.describe(defn)}[/dim]")
+    if res.as_of and res.as_of < updater.expected_last_session().isoformat():
+        console.print("[yellow]⚠ stored prices are behind; run stk update for the latest[/yellow]")
+    if res.total == 0:
+        console.print("No stocks match right now.")
+    else:
+        console.print(render_screen(res, show_names=args.names))
+        if res.total > len(res.rows):
+            console.print(f"[dim]Showing {len(res.rows)} of {res.total}. More: --limit 100, or --csv FILE[/dim]")
+    if args.csv:
+        console.print(f"[green]✓[/green] saved {res.total} rows to {_screen_csv(args.csv, res)}")
+    return 0
+
+
+def cmd_screen(args: argparse.Namespace) -> int:
+    conn = db.connect()
+    try:
+        return _screen(conn, args)
+    except screens.ScreenError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return 1
+
+
 def cmd_probe(_: argparse.Namespace) -> int:
     """Find out which requests the data source refuses (for 429 problems)."""
     console.print("Testing the data source with a few small requests (about 20 seconds)...")
@@ -558,6 +809,7 @@ def build_parser() -> argparse.ArgumentParser:
     u.add_argument("--years", type=int, choices=[1, 2, 5, 10], default=2, help="history to download (default 2)")
     u.add_argument("--workers", type=int, default=2, help="parallel downloads (default 2)")
     u.add_argument("--delay", type=float, default=0.8, help="seconds between requests (default 0.8)")
+    u.add_argument("--retry-missing", action="store_true", help="ask again about stocks Yahoo had no data for")
     u.set_defaults(func=cmd_update)
 
     s = sub.add_parser("status", help="what is stored and how fresh it is")
@@ -582,6 +834,24 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("action", nargs="?", choices=["add", "remove", "list"])
     w.add_argument("symbols", nargs="*")
     w.set_defaults(func=cmd_watch)
+
+    sc = sub.add_parser("screen", help="find stocks: built-in screens, your own filters, saved screens")
+    sc.add_argument("words", nargs="*", help="a screen name, or: list | fields | show NAME | save NAME | delete NAME")
+    sc.add_argument("--rsi-below", type=float, metavar="N", help="RSI under N")
+    sc.add_argument("--rsi-above", type=float, metavar="N", help="RSI over N")
+    sc.add_argument("--above-sma", type=int, metavar="N", help="price above its N-day average (20, 50 or 200)")
+    sc.add_argument("--below-sma", type=int, metavar="N", help="price below its N-day average (20, 50 or 200)")
+    sc.add_argument("--min-volume-ratio", type=float, metavar="X", help="volume at least X times its 20-day average")
+    sc.add_argument("--min-turnover", type=float, metavar="CR", help="average daily traded value of at least CR crore")
+    sc.add_argument("--industry", metavar="TEXT", help="industry contains TEXT")
+    sc.add_argument("--where", action="append", metavar="EXPR", help='any condition, e.g. "chg_1m<-5" (repeatable)')
+    sc.add_argument("--sort", metavar="FIELD", help="sort by this field")
+    sc.add_argument("--asc", action="store_true", help="smallest first")
+    sc.add_argument("--desc", action="store_true", help="largest first")
+    sc.add_argument("--limit", type=int, metavar="N", help="rows to show (default 25)")
+    sc.add_argument("--names", action="store_true", help="show company names")
+    sc.add_argument("--csv", metavar="FILE", help="also save every match to a CSV file")
+    sc.set_defaults(func=cmd_screen)
 
     d = sub.add_parser("doctor", help="check setup and connectivity")
     d.set_defaults(func=cmd_doctor)

@@ -23,6 +23,13 @@ class HistoryError(Exception):
         self.transient = transient
 
 
+class NotFound(HistoryError):
+    """The data source has no such symbol (permanent, retrying will not help)."""
+
+    def __init__(self, message: str):
+        super().__init__(message, transient=False)
+
+
 class RateLimited(HistoryError):
     """The data source answered HTTP 429: it wants us to slow down."""
 
@@ -45,6 +52,8 @@ def parse_history(payload: dict, ticker: str) -> HistoryResult:
     chart = payload.get("chart") or {}
     if chart.get("error"):
         err = chart["error"]
+        if str(err.get("code", "")).lower() == "not found":
+            raise NotFound(f"{ticker}: symbol not found")
         raise HistoryError(f'{ticker}: {err.get("description") or err.get("code")}')
     results = chart.get("result") or []
     if not results:
@@ -134,7 +143,7 @@ def fetch_history(
 
         code = resp.status_code
         if code == 404:
-            raise HistoryError(f"{ticker}: symbol not found")
+            raise NotFound(f"{ticker}: symbol not found")
         if code == 429:
             # Yahoo has two equivalent hosts with separate limits; try the other once.
             if not alt_tried and "//query1." in url:
