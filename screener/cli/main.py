@@ -10,7 +10,11 @@
     stk screen --rsi-below 30 --above-sma 200     your own filters
     stk find tata                 search symbols and company names
     stk watch add TCS INFY        manage the watchlist; `stk watch` shows prices
+    stk alert add TCS above 2200  alerts; `stk alert check` tests them
+    stk telegram setup            get alerts and daily summaries on Telegram
+    stk daily / stk schedule      automatic daily run
     stk doctor                    check setup and connectivity
+    stk                           home screen with a menu
 """
 
 from __future__ import annotations
@@ -33,7 +37,8 @@ from rich.table import Table
 from rich.text import Text
 
 from .. import __version__
-from ..core import db, indicators, probe, queries, screens, symbols, updater
+from ..core import db, fundamentals, indicators, probe, queries, screens, symbols, updater
+from . import style as sty
 from ..core.quote import IST, YAHOO_HEADERS, Quote, QuoteError, get_quotes, is_market_open
 
 console = Console()
@@ -57,8 +62,7 @@ def _volume(v) -> str:
 def _pct(v, plain: bool = False) -> Text:
     if v is None:
         return Text("-", style="dim")
-    style = "green" if v >= 0 else "red"
-    return Text(f"{v:+.2f}%", style=style)
+    return Text(f"{v:+.2f}%", style=sty.pct_style(v))
 
 
 def _bar(pos: float, width: int = 12) -> str:
@@ -84,7 +88,8 @@ def _change(q: Quote) -> Text:
         return Text("-")
     up = q.change >= 0
     arrow = "▲" if up else "▼"
-    style = "bold green" if up else "bold red"
+    style = sty.pct_style(q.change_pct)
+    style = style if style.startswith("bold") else f"bold {style}".strip()
     return Text(f"{arrow} {q.change:+,.2f} ({q.change_pct:+.2f}%)", style=style)
 
 
@@ -110,7 +115,7 @@ def render_single(q: Quote) -> Panel:
     t = Table.grid(padding=(0, 2))
     t.add_column(style="dim")
     t.add_column(justify="right")
-    t.add_row("Price", Text(f"₹{q.price:,.2f}", style="bold"))
+    t.add_row("Price", Text(f"₹{q.price:,.2f}", style=sty.price_style(q.change)))
     t.add_row("Change", _change(q))
     t.add_row("Prev close", _money(q.prev_close))
     t.add_row("Day range", f"{_money(q.day_low)} - {_money(q.day_high)}")
@@ -135,7 +140,7 @@ def render_many(quotes: list) -> Table:
         sym = q.symbol + ("*" if q.source == "stale" else "")
         t.add_row(
             sym,
-            f"{q.price:,.2f}",
+            Text(f"{q.price:,.2f}", style=sty.price_style(q.change)),
             _change(q),
             f"{_money(q.day_low)}-{_money(q.day_high)}",
             _volume(q.volume),
@@ -151,17 +156,30 @@ def render(quotes: list):
     return Group(*parts)
 
 
+LIVE_MIN, LIVE_DEFAULT = 3, 5  # seconds between live refreshes
+
+
 def show_quotes(symbols_: list, bse: bool = False, watch_secs: int = 0) -> int:
     def fetch():
-        return get_quotes(symbols_, prefer_bse=bse)
+        return get_quotes(symbols_, prefer_bse=bse, use_cache=not watch_secs)
 
     if watch_secs:
-        interval = max(watch_secs, 15)  # don't hammer the source
+        base = max(watch_secs, LIVE_MIN)
+        interval = base
         try:
             with Live(render(fetch()), console=console, refresh_per_second=2) as live:
                 while True:
                     time.sleep(interval)
-                    live.update(render(fetch()))
+                    quotes = fetch()
+                    got = any(isinstance(q, Quote) and q.source == "live" for q in quotes)
+                    # if the source pushes back, slow down instead of hammering it
+                    interval = base if got else min(interval * 2, 60)
+                    body = render(quotes)
+                    if interval > base:
+                        body = Group(body, Text(f"source not answering - retrying every {interval}s", style="yellow"))
+                    else:
+                        body = Group(body, Text(f"refreshing every {base}s - Ctrl+C to stop", style="dim"))
+                    live.update(body)
         except KeyboardInterrupt:
             return 0
 
@@ -410,11 +428,15 @@ def cmd_history(args: argparse.Namespace) -> int:
     t.add_column("Close", justify="right")
     t.add_column("Chg", justify="right")
     t.add_column("Vol", justify="right")
+    _vs = [r["volume"] for r in rows if r["volume"] is not None]
+    avg_vol = sum(_vs) / len(_vs) if _vs else None
     for r in rows:
         cells = [_date(r["date"])]
         if args.ohlc:
             cells += [_money(r["open"]), _money(r["high"]), _money(r["low"])]
-        cells += [_money(r["close"]), _pct(r["chg_pct"]), _volume(r["volume"])]
+        ratio = (r["volume"] / avg_vol) if (r["volume"] is not None and avg_vol) else None
+        vol = Text(_volume(r["volume"]), style=sty.volume_style(ratio, r["chg_pct"]))
+        cells += [Text(_money(r["close"]), style=sty.pct_style(r["chg_pct"]).replace("bold ", "")), _pct(r["chg_pct"]), vol]
         t.add_row(*cells)
 
     first, last = rows[0], rows[-1]
@@ -478,6 +500,13 @@ def _macd_text(ind: dict) -> str:
     return text
 
 
+FUND_ROWS = [
+    ("market_cap_cr", "Market cap (Cr)"), ("pe", "P/E"), ("pb", "P/B"), ("eps", "EPS"), ("div_yield", "Dividend %"),
+    ("roe", "ROE"), ("roa", "ROA"), ("profit_margin", "Net margin"), ("op_margin", "Operating margin"),
+    ("debt_equity", "Debt / equity"), ("rev_growth", "Revenue growth"), ("earn_growth", "Earnings growth"),
+]
+
+
 def cmd_info(args: argparse.Namespace) -> int:
     conn = db.connect()
     sym = _need_symbol(conn, args.symbol)
@@ -497,7 +526,10 @@ def cmd_info(args: argparse.Namespace) -> int:
         t.add_row(f"Change {label}", _pct(st.chg[label]))
     t.add_row("52w low", _money(st.low52))
     t.add_row("52w high", _money(st.high52))
-    t.add_row("In range", f"{_bar(st.range_pos)} {st.range_pos * 100:.0f}%")
+    t.add_row(
+        "In range",
+        Text(f"{_bar(st.range_pos)} {st.range_pos * 100:.0f}%", style="green" if st.range_pos >= 0.66 else "red" if st.range_pos <= 0.33 else ""),
+    )
     t.add_row("From high", _pct(st.from_high_pct))
     t.add_row("From low", _pct(st.from_low_pct))
     ind = indicators.compute_symbol(conn, sym["id"])
@@ -506,7 +538,7 @@ def cmd_info(args: argparse.Namespace) -> int:
         rsi = ind["rsi14"]
         if rsi is not None:
             tag = " (oversold)" if rsi < 30 else " (overbought)" if rsi > 70 else ""
-            t.add_row("RSI (14)", f"{rsi:.1f}{tag}")
+            t.add_row("RSI (14)", Text(f"{rsi:.1f}{tag}", style=sty.rsi_style(rsi)))
         for n in (50, 200):
             avg = ind[f"sma{n}"]
             if avg:
@@ -518,10 +550,23 @@ def cmd_info(args: argparse.Namespace) -> int:
         if macd:
             t.add_row("MACD", macd)
         if ind["vol_ratio"] is not None:
-            t.add_row("Volume", f'{_volume(ind["volume"])} ({ind["vol_ratio"]:.1f}x avg)')
+            t.add_row(
+                "Volume",
+                Text(f'{_volume(ind["volume"])} ({ind["vol_ratio"]:.1f}x avg)', style=sty.volume_style(ind["vol_ratio"], ind["chg_1d"])),
+            )
 
+    fund = fundamentals.get(conn, sym["id"])
+    if fund and any(fund[c] is not None for c in indicators.FUND_COLUMNS):
+        t.add_row("", "")
+        for name, label in FUND_ROWS:
+            if fund.get(name) is not None:
+                t.add_row(label, _fmt_field(name, fund[name]))
     title = f'[bold]{sym["ticker"]}[/bold]  {sym["name"] or ""}'
     console.print(Panel(t, title=title, subtitle=sym["industry"] or None, box=box.ROUNDED, expand=False))
+    if fund is None:
+        console.print(f'[dim]No fundamentals yet. Run: stk fundamentals update {sym["ticker"]}[/dim]')
+    elif all(fund[c] is None for c in indicators.FUND_COLUMNS):
+        console.print("[dim]The data source has no fundamentals for this stock.[/dim]")
     target = updater.expected_last_session().isoformat()
     if st.last_date < target:
         console.print(f"[yellow]⚠ stored data ends {_date(st.last_date)}; run stk update[/yellow]")
@@ -559,7 +604,61 @@ def cmd_watch(args: argparse.Namespace) -> int:
     if action == "list":
         console.print(", ".join(items))
         return 0
-    return show_quotes(items)
+    if args.once or not sys.stdout.isatty():
+        return show_quotes(items)
+    return show_quotes(items, watch_secs=args.every or LIVE_DEFAULT)
+
+
+def cmd_fundamentals(args: argparse.Namespace) -> int:
+    conn = db.connect()
+    action = args.action or "status"
+    if action == "probe":
+        console.print("[bold]Checking the fundamentals source...[/bold]")
+        steps = fundamentals.probe()
+        for label, ok, detail in steps:
+            console.print(f'{"[green]✓[/green]" if ok else "[red]✗[/red]"} {label}  [dim]{detail}[/dim]')
+        if not all(ok for _, ok, _ in steps):
+            console.print("\n[bold]Copy everything above and send it back.[/bold]")
+            return 1
+        return 0
+    if action == "status":
+        cov = fundamentals.coverage(conn)
+        if not cov["stored"]:
+            console.print("No fundamentals yet. Try: [bold]stk fundamentals probe[/bold], then [bold]stk fundamentals update[/bold]")
+            return 0
+        console.print(f"Fundamentals stored for {cov['stored']} of {cov['active']} stocks ({cov['with_pe']} with a P/E).")
+        console.print(f"Oldest {cov['oldest'][:10]} · newest {cov['newest'][:10]}. Refresh: stk fundamentals update --all")
+        return 0
+
+    if args.symbols:
+        names = args.symbols
+    elif args.all:
+        names = None
+    else:
+        names = queries.watch_list(conn)
+        if not names:
+            console.print("Your watchlist is empty. Give symbols (stk fundamentals update TCS INFY) or use --all.")
+            return 1
+    missing = [n for n in (names or []) if not conn.execute("SELECT 1 FROM symbols WHERE ticker = ?", (n.upper(),)).fetchone()]
+    if missing:
+        console.print(f"[yellow]Not in your database (skipped): {', '.join(missing)}[/yellow]")
+    with Progress(SpinnerColumn(), TextColumn("{task.description}"), BarColumn(), TaskProgressColumn(), console=console, transient=True) as bar:
+        task = bar.add_task("fundamentals", total=None)
+
+        def tick(i: int, n: int, ticker: str) -> None:
+            bar.update(task, total=n, completed=i - 1, description=f"fundamentals {ticker}")
+
+        res = fundamentals.refresh(conn, names, force=args.force, delay=args.delay, progress=tick)
+    console.print(
+        f"[green]✓[/green] downloaded {res.ok} · recent already {res.skipped} · no data at source {res.empty} · failed {len(res.failed)}"
+    )
+    for t, msg in res.failed[:8]:
+        console.print(f"  [red]✗[/red] {msg}")
+    if res.aborted:
+        console.print("[yellow]Stopped early: the data source kept refusing. Wait a few minutes and run it again (finished stocks are kept).[/yellow]")
+        console.print("Run [bold]stk fundamentals probe[/bold] to see what is wrong.")
+        return 1
+    return 0
 
 
 def cmd_doctor(_: argparse.Namespace) -> int:
@@ -608,15 +707,19 @@ def _fmt_field(name: str, v) -> Text:
         return Text("-", style="dim")
     kind = indicators.FIELD_BY_NAME[name].kind
     if kind == "pct":
-        return Text(f"{v:+.1f}%", style="green" if v >= 0 else "red")
+        return Text(f"{v:+.1f}%", style=sty.pct_style(v))
     if kind == "price":
         return Text(f"{v:,.1f}")
     if kind == "rsi":
-        return Text(f"{v:.1f}")
+        return Text(f"{v:.1f}", style=sty.rsi_style(v))
     if kind == "macd":
-        return Text(f"{v:+.3f}")
+        return Text(f"{v:+.3f}", style="green" if v > 0 else "red" if v < 0 else "")
     if kind == "ratio":
-        return Text(f"{v:.1f}x")
+        return Text(f"{v:.1f}x", style=sty.volume_style(v))
+    if kind == "num":
+        return Text(f"{v:,.1f}" if abs(v) >= 10 or name == "pe" else f"{v:,.2f}")
+    if kind == "pct0":
+        return Text(f"{v:.0f}%", style="green" if v >= 15 else "red" if v < 0 else "")
     if kind == "days":
         return Text(f"{int(v)}d")
     if kind == "cr":
@@ -746,6 +849,9 @@ def _screen(conn: sqlite3.Connection, args: argparse.Namespace) -> int:
         console.print("No prices stored yet. Run [bold]stk init[/bold], then [bold]stk update[/bold].")
         return 1
     _refresh_indicators(conn)
+    if screens.uses_fundamentals(defn) and fundamentals.coverage(conn)["with_pe"] == 0:
+        console.print("[yellow]No fundamentals downloaded yet.[/yellow] Run: [bold]stk fundamentals update --all[/bold] (about 7 minutes)")
+        return 1
     res = screens.run(conn, defn)
 
     head = f"[bold]{title}[/bold] · {res.total} match" + ("" if res.total == 1 else "es")
@@ -755,6 +861,9 @@ def _screen(conn: sqlite3.Connection, args: argparse.Namespace) -> int:
     console.print(f"[dim]{screens.describe(defn)}[/dim]")
     if res.as_of and res.as_of < updater.expected_last_session().isoformat():
         console.print("[yellow]⚠ stored prices are behind; run stk update for the latest[/yellow]")
+    if screens.uses_fundamentals(defn):
+        cov = fundamentals.coverage(conn)
+        console.print(f"[dim]Fundamentals for {cov['with_pe']} of {cov['active']} stocks (updated {cov['newest'][:10]}); stocks without the data are skipped.[/dim]")
     if res.total == 0:
         console.print("No stocks match right now.")
     else:
@@ -787,16 +896,201 @@ def cmd_probe(_: argparse.Namespace) -> int:
     return 0 if any(r.status == 200 for r in results) else 1
 
 
+def cmd_home(_: argparse.Namespace) -> int:
+    from . import home
+
+    return home.run(console, main)
+
+
+# ------------------------------------------------------- alerts & telegram (4B)
+def _notify(text: str) -> None:
+    """Send to Telegram if it is set up; say so (never crash) if it fails."""
+    from ..core import notify
+
+    if not notify.configured():
+        return
+    try:
+        notify.send(text)
+        console.print("[dim]sent to Telegram[/dim]")
+    except notify.NotifyError as exc:
+        console.print(f"[yellow]Telegram: {exc}[/yellow]")
+
+
+def _print_fired(fired: list) -> None:
+    for a in fired:
+        console.print(f"[bold yellow]🔔[/bold yellow] {a['message']}")
+
+
+def _alert_table(rows: list) -> Table:
+    from ..core import alerts
+
+    t = Table(box=box.SIMPLE_HEAD, header_style="bold", pad_edge=False)
+    for c in ("ID", "Alert", "Status"):
+        t.add_column(c)
+    for a in rows:
+        if a["active"]:
+            status = Text("watching", style="green")
+        else:
+            status = Text(f"fired {a['triggered_at'][:16]}", style="yellow")
+        t.add_row(str(a["id"]), alerts.describe(a), status)
+    return t
+
+
+def cmd_alert(args: argparse.Namespace) -> int:
+    from ..core import alerts
+
+    conn = db.connect()
+    action, words = args.action or "list", args.words
+    try:
+        if action == "add":
+            if len(words) != 3:
+                console.print("Usage: [bold]stk alert add SYMBOL TYPE VALUE[/bold]")
+                for kind, (_, meaning, example) in alerts.KINDS.items():
+                    console.print(f"  {example:<34}[dim]{meaning}[/dim]")
+                return 1
+            aid = alerts.add(conn, words[0], words[1], words[2])
+            a = [x for x in alerts.list_all(conn) if x["id"] == aid][0]
+            console.print(f"[green]✓[/green] alert {aid}: {alerts.describe(a)}")
+            return 0
+        if action in ("remove", "reset"):
+            ids = [int(w) for w in words if w.isdigit()]
+            if not ids:
+                console.print(f"Usage: stk alert {action} ID [ID ...]")
+                return 1
+            n = (alerts.remove if action == "remove" else alerts.reset)(conn, ids)
+            console.print(f"[green]✓[/green] {action}d {n} alert(s)" if n else "No alert with that ID.")
+            return 0
+        if action == "check":
+            return _alert_check(conn, args.loop, args.no_notify)
+    except alerts.AlertError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return 1
+    rows = alerts.list_all(conn)
+    if not rows:
+        console.print("No alerts yet. Example: [bold]stk alert add TCS above 2200[/bold]")
+        return 0
+    console.print(_alert_table(rows))
+    return 0
+
+
+def _alert_check(conn, loop: int, no_notify: bool) -> int:
+    from ..core import alerts
+
+    def once() -> None:
+        fired = alerts.check(conn)
+        if fired:
+            _print_fired(fired)
+            if not no_notify:
+                _notify("🔔 stk alerts\n" + "\n".join(f"• {a['message']}" for a in fired))
+        else:
+            console.print(f"[dim]{datetime.now(IST).strftime('%H:%M')} no alerts fired ({len(alerts.list_all(conn, True))} watching)[/dim]")
+
+    if not loop:
+        once()
+        return 0
+    interval = max(loop, 60)  # don't hammer the data source
+    console.print(f"Checking every {interval}s - Ctrl+C to stop.")
+    try:
+        while True:
+            once()
+            if not alerts.list_all(conn, True):
+                console.print("All alerts have fired.")
+                return 0
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        return 0
+
+
+def cmd_telegram(args: argparse.Namespace) -> int:
+    from ..core import notify
+
+    if args.action == "test":
+        try:
+            notify.send("✓ stk can reach you on Telegram.")
+        except notify.NotifyError as exc:
+            console.print(f"[red]{exc}[/red]")
+            return 1
+        console.print("[green]✓[/green] test message sent")
+        return 0
+    if args.action == "status":
+        console.print("Telegram: [green]set up[/green]" if notify.configured() else "Telegram: not set up (stk telegram setup)")
+        return 0
+    console.print(
+        "1. In Telegram open [bold]@BotFather[/bold] and send /newbot, then follow the steps.\n"
+        "2. Copy the token it gives you (looks like 123456:ABC...).\n"
+        "3. Open your new bot and send it any message, e.g. hello."
+    )
+    token = input("Paste the token here > ").strip()
+    if not token:
+        return 1
+    input("Press Enter after you have messaged the bot > ")
+    try:
+        chat = notify.find_chat_id(token)
+    except notify.NotifyError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return 1
+    if not chat:
+        console.print("[red]The bot has no messages yet.[/red] Send it one, then run: stk telegram setup")
+        return 1
+    notify.save(token, chat)
+    console.print("[green]✓[/green] saved")
+    return cmd_telegram(argparse.Namespace(action="test"))
+
+
+def cmd_daily(args: argparse.Namespace) -> int:
+    """Update prices, check alerts, send the summary. Made for a scheduler."""
+    from ..core import alerts, daily
+
+    rc = cmd_update(
+        argparse.Namespace(symbols=[], full=False, years=2, workers=2, delay=0.8, retry_missing=False)
+    )
+    conn = db.connect()
+    try:  # keep the watchlist's fundamentals fresh (weekly); never let this break the run
+        fundamentals.refresh(conn, queries.watch_list(conn))
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[dim]fundamentals skipped: {exc}[/dim]")
+    fired = alerts.check(conn)
+    text = daily.summary(conn, fired)
+    console.print(text)
+    if not args.no_notify:
+        _notify(text)
+    return rc
+
+
+SCHEDULE_HELP = """[bold]Run stk by itself every day (Termux)[/bold]
+
+One-time setup:
+  pkg install cronie termux-services
+  (close and reopen Termux)
+  sv-enable crond
+  termux-wake-lock          [dim]# keeps Termux alive in the background[/dim]
+
+Then open the schedule with [bold]crontab -e[/bold] and add:
+  30 16 * * 1-5  stk daily                [dim]# 4:30 pm Mon-Fri: update + alerts + summary[/dim]
+  */15 9-15 * * 1-5  stk alert check      [dim]# every 15 min in market hours[/dim]
+
+Android may stop background apps to save battery. If nothing arrives, set
+Termux to "unrestricted" in the phone's battery settings.
+Check that Telegram works first: [bold]stk telegram test[/bold]"""
+
+
+def cmd_schedule(_: argparse.Namespace) -> int:
+    console.print(SCHEDULE_HELP)
+    return 0
+
+
 # ------------------------------------------------------------------- parser
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="stk", description="Personal NSE/BSE stock screener")
     p.add_argument("--version", action="version", version=f"stk {__version__}")
+    p.add_argument("--no-color", action="store_true", help="plain output (also honours the NO_COLOR variable)")
+    p.add_argument("--no-splash", action="store_true", help="print help instead of the home screen")
     sub = p.add_subparsers(dest="command")
 
     q = sub.add_parser("quote", help="latest price (no names = your watchlist)")
     q.add_argument("symbols", nargs="*", help="e.g. RELIANCE TCS, RELIANCE.BO, 500325, ^NSEI")
     q.add_argument("--bse", action="store_true", help="look up on BSE first")
-    q.add_argument("--watch", type=int, metavar="SECS", help="refresh every SECS seconds (min 15)")
+    q.add_argument("--watch", type=int, nargs="?", const=LIVE_DEFAULT, metavar="SECS", help="live view, refreshing every SECS seconds (default 5, min 3)")
     q.set_defaults(func=cmd_quote)
 
     i = sub.add_parser("init", help="create the database and load the Nifty 500 list")
@@ -833,6 +1127,8 @@ def build_parser() -> argparse.ArgumentParser:
     w = sub.add_parser("watch", help="watchlist: add, remove, list, or show live prices")
     w.add_argument("action", nargs="?", choices=["add", "remove", "list"])
     w.add_argument("symbols", nargs="*")
+    w.add_argument("--once", action="store_true", help="print the prices once instead of a live view")
+    w.add_argument("--every", type=int, metavar="SECS", help="live refresh interval (default 5, min 3)")
     w.set_defaults(func=cmd_watch)
 
     sc = sub.add_parser("screen", help="find stocks: built-in screens, your own filters, saved screens")
@@ -853,6 +1149,35 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument("--csv", metavar="FILE", help="also save every match to a CSV file")
     sc.set_defaults(func=cmd_screen)
 
+    al = sub.add_parser("alert", help="alerts: add, list, remove, reset, check")
+    al.add_argument("action", nargs="?", choices=["add", "list", "remove", "reset", "check"])
+    al.add_argument("words", nargs="*", help="add: SYMBOL TYPE VALUE (e.g. TCS above 2200); remove/reset: IDs")
+    al.add_argument("--loop", type=int, metavar="SECS", help="check: repeat every SECS seconds (min 60)")
+    al.add_argument("--no-notify", action="store_true", help="check: do not send to Telegram")
+    al.set_defaults(func=cmd_alert)
+
+    tg = sub.add_parser("telegram", help="set up and test Telegram messages")
+    tg.add_argument("action", nargs="?", choices=["setup", "test", "status"], default="setup")
+    tg.set_defaults(func=cmd_telegram)
+
+    dl = sub.add_parser("daily", help="update prices, check alerts and send the summary (for a scheduler)")
+    dl.add_argument("--no-notify", action="store_true", help="do not send to Telegram")
+    dl.set_defaults(func=cmd_daily)
+
+    sch = sub.add_parser("schedule", help="how to run stk automatically every day")
+    sch.set_defaults(func=cmd_schedule)
+
+    hm = sub.add_parser("home", help="home screen with menu (also: just run stk)")
+    hm.set_defaults(func=cmd_home)
+
+    fu = sub.add_parser("fundamentals", aliases=["fund"], help="P/E, ROE, margins, growth: download and check")
+    fu.add_argument("action", nargs="?", choices=["update", "status", "probe"])
+    fu.add_argument("symbols", nargs="*")
+    fu.add_argument("--all", action="store_true", help="every stock in the database (about 7 minutes)")
+    fu.add_argument("--force", action="store_true", help="download again even if fetched this week")
+    fu.add_argument("--delay", type=float, default=0.8, help="seconds between requests (default 0.8)")
+    fu.set_defaults(func=cmd_fundamentals)
+
     d = sub.add_parser("doctor", help="check setup and connectivity")
     d.set_defaults(func=cmd_doctor)
 
@@ -864,7 +1189,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.no_color:
+        console.no_color = True
     if not getattr(args, "func", None):
+        if sys.stdout.isatty() and not args.no_splash:
+            return cmd_home(args)
         parser.print_help()
         return 0
     try:

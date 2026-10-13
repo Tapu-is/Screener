@@ -69,6 +69,65 @@ How the numbers are defined: RSI is the 14-day Wilder RSI; moving averages are s
 
 Screens flag candidates from end-of-day data. They are a starting point for your own research, not advice.
 
+### Home screen and colors (Phase 4A)
+
+Run `stk` on its own for the home screen: logo, market status, Nifty/Sensex, data freshness,
+watchlist summary and a numbered menu (1 Watchlist, 2 Screens, 3 Find/Info, 4 History,
+5 Alerts, 6 Update, 7 Status). You can also type any normal command there, e.g. `quote TCS`.
+`stk --no-splash` prints plain help instead. Output is colored (green up / red down, bold for
+moves of 3% or more; volume spikes in yellow or bold; RSI red above 70, green below 30).
+Use `--no-color` or set `NO_COLOR=1` for plain text.
+
+### Alerts and Telegram (Phase 4B)
+
+```
+stk alert add TCS above 2200        price at or above (also: below)
+stk alert add TCS rsi-below 30      RSI(14) at or below (also: rsi-above)
+stk alert add TCS move 5            today's move of +/-5% or more
+stk alert add TCS volume 2          volume 2x its 20-day average
+stk alert                           list alerts (watching / fired)
+stk alert check                     test them now (--loop 120 repeats every 2 min)
+stk alert reset 3   /  remove 3     re-arm or delete an alert
+```
+
+An alert fires once, then switches itself off; `reset` re-arms it. Price, move and volume alerts
+use a live quote; RSI alerts use the stored daily data.
+
+**Telegram:** `stk telegram setup` walks you through creating a bot with @BotFather and finds your
+chat id. `stk telegram test` sends a test message. The token is kept in `telegram.json` in the stk
+data folder (not in the repo). With Telegram set up, fired alerts are sent to your phone.
+
+**Daily run:** `stk daily` updates prices, recalculates indicators, checks alerts and sends a
+summary (top gainers/losers, oversold/overbought counts, volume spikes, your watchlist).
+`stk schedule` prints the steps to run it automatically with cron in Termux.
+
+### Fundamentals (Phase 5)
+
+```
+stk fundamentals probe            check the data source works from your phone (run this first)
+stk fundamentals update           download for your watchlist
+stk fundamentals update TCS INFY  download for named stocks
+stk fundamentals update --all     every stock (about 7 minutes; fine to run once a week)
+stk fundamentals                  what is stored and how old it is
+stk info TCS                      now includes market cap, P/E, P/B, ROE, margins, debt, growth
+stk screen value                  P/E under 20, P/B under 3, ROE over 12 (also: quality, growth, dividend)
+stk screen --where "pe<15" --where "roe>18" --rsi-below 40
+```
+
+Fields for your own screens: `market_cap_cr pe pb eps div_yield roe roa profit_margin op_margin
+debt_equity rev_growth earn_growth` (see `stk screen fields`). Stocks with no figure for a field
+never match a screen on it, and the screen tells you how many stocks have fundamentals.
+Data comes from Yahoo and can be patchy or a little old for Indian stocks, so treat it as a
+first filter, not a verdict. `stk daily` refreshes your watchlist's fundamentals weekly.
+
+### Live prices
+
+`stk watch` is now a live view on a terminal: prices refresh every 5 seconds (change it with
+`--every 3`, minimum 3) until you press Ctrl+C; `stk watch --once` prints once.
+`stk quote TCS --watch` does the same for any symbols. The refresh bypasses the 45-second cache,
+fetches the stocks side by side, and backs off by itself if the data source pushes back.
+Yahoo's free feed can itself run a few minutes behind the exchange.
+
 ### More options
 
 `stk quote RELIANCE --bse`, `stk quote 500325` (BSE code), `stk quote ^NSEI`, `stk quote RELIANCE --watch 30` (refresh every 30s), `stk update TCS` (one stock), `stk update --full` (re-download everything), `stk update --years 5`, `stk update --retry-missing` (ask again about stocks Yahoo had no data for), `stk probe` (diagnose Yahoo 429 errors).
@@ -102,9 +161,9 @@ python -m unittest discover -s tests -v
 1. `quote` (done)
 2. Database, Nifty 500 list, daily updater, history/info/find/watchlist (done)
 3. Indicators and `stk screen` with built-in, custom and saved screens (done)
-4. Telegram alerts and scheduled runs
-5. Fundamentals (P/E, ROE) from a second data source
-6. Streamlit web dashboard sharing the same core
+4. Home screen, colors, alerts, Telegram and a daily run (done)
+5. Fundamentals (P/E, ROE), live prices, new logo (done; fundamentals source needs a check on your phone)
+6. Streamlit web dashboard (next) sharing the same core
 
 ## Disclaimer
 

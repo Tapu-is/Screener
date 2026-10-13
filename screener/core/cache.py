@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -44,10 +45,14 @@ def get(key: str, max_age: Optional[float] = None) -> Optional[dict[str, Any]]:
     return entry["data"]
 
 
+_LOCK = threading.Lock()
+
+
 def put(key: str, data: dict[str, Any]) -> None:
-    store = _load()
-    store[key] = {"_saved": time.time(), "data": data}
-    try:
-        _file().write_text(json.dumps(store))
-    except OSError:
-        pass  # cache is best-effort
+    with _LOCK:  # several quotes may be fetched at once
+        store = _load()
+        store[key] = {"_saved": time.time(), "data": data}
+        try:
+            _file().write_text(json.dumps(store))
+        except OSError:
+            pass  # cache is best-effort

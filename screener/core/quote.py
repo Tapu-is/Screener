@@ -24,6 +24,8 @@ from urllib.parse import quote as urlquote
 
 import requests
 
+from concurrent.futures import ThreadPoolExecutor
+
 from . import cache
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -242,15 +244,18 @@ def get_quote(symbol: str, prefer_bse: bool = False, use_cache: bool = True) -> 
     raise QuoteError(str(last_error) if last_error else f"{symbol}: not found")
 
 
-def get_quotes(symbols: list[str], prefer_bse: bool = False) -> list:
-    """Quotes for several symbols. Failures come back as QuoteError objects
-    in place of a Quote, so one bad ticker never hides the rest."""
-    out = []
-    for i, sym in enumerate(symbols):
+def get_quotes(symbols: list[str], prefer_bse: bool = False, use_cache: bool = True) -> list:
+    """Quotes for several symbols, fetched side by side so a refresh takes about as
+    long as one lookup. Failures come back as QuoteError objects in place of a
+    Quote, so one bad ticker never hides the rest. Order is kept."""
+
+    def one(sym: str):
         try:
-            out.append(get_quote(sym, prefer_bse))
+            return get_quote(sym, prefer_bse, use_cache)
         except QuoteError as exc:
-            out.append(exc)
-        if i < len(symbols) - 1:
-            time.sleep(0.15)  # be polite to the data source
-    return out
+            return exc
+
+    if len(symbols) <= 1:
+        return [one(s) for s in symbols]
+    with ThreadPoolExecutor(max_workers=min(4, len(symbols))) as pool:
+        return list(pool.map(one, symbols))

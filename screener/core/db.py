@@ -11,7 +11,7 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS symbols (
@@ -80,6 +80,34 @@ CREATE TABLE IF NOT EXISTS saved_screens (
     name       TEXT PRIMARY KEY,
     definition TEXT NOT NULL,                -- JSON
     created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS alerts (
+    id              INTEGER PRIMARY KEY,
+    ticker          TEXT NOT NULL,
+    kind            TEXT NOT NULL,           -- above, below, rsi-below, rsi-above, move, volume
+    value           REAL NOT NULL,
+    active          INTEGER NOT NULL DEFAULT 1,
+    created_at      TEXT NOT NULL,
+    triggered_at    TEXT,
+    triggered_note  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS fundamentals (
+    symbol_id     INTEGER PRIMARY KEY REFERENCES symbols(id) ON DELETE CASCADE,
+    fetched_at    TEXT NOT NULL,
+    market_cap_cr REAL,                      -- rupees crore
+    pe            REAL,
+    pb            REAL,
+    eps           REAL,
+    div_yield     REAL,                      -- percent
+    roe           REAL,                      -- percent
+    roa           REAL,                      -- percent
+    profit_margin REAL,                      -- percent
+    op_margin     REAL,                      -- percent
+    debt_equity   REAL,                      -- ratio (0.5 = half as much debt as equity)
+    rev_growth    REAL,                      -- percent, latest year on year
+    earn_growth   REAL                       -- percent, latest year on year
 );
 
 CREATE TABLE IF NOT EXISTS update_log (

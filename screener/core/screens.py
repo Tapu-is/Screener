@@ -30,10 +30,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-from .indicators import FIELDS
+from .indicators import FIELDS, FUND_COLUMNS, FUND_FIELDS
 from .quote import IST
 
-NUMERIC = {f.name for f in FIELDS}
+NUMERIC = {f.name for f in FIELDS + FUND_FIELDS}
 TEXT_FIELDS = {"ticker", "name", "industry"}
 NUM_OPS = ("<", "<=", ">", ">=", "==", "!=")
 TEXT_OPS = ("==", "!=", "contains")
@@ -124,6 +124,26 @@ BUILTIN: dict = {
         "description": "Biggest one-day losses (liquid stocks only).",
         "all": [_c("chg_1d", "<", 0), _c("turnover20_cr", ">=", 1)],
         "sort": "chg_1d", "order": "asc", "limit": 20, "show": ["chg_1d", "vol_ratio"],
+    },
+    "value": {
+        "description": "Cheap on earnings and book value, and profitable (needs fundamentals).",
+        "all": [_c("pe", ">", 0), _c("pe", "<", 20), _c("pb", "<", 3), _c("roe", ">", 12), _c("market_cap_cr", ">=", 1000)],
+        "sort": "pe", "order": "asc", "limit": 25, "show": ["pe", "pb", "roe"],
+    },
+    "quality": {
+        "description": "High return on equity, healthy margins and low debt (needs fundamentals).",
+        "all": [_c("roe", ">", 18), _c("profit_margin", ">", 10), _c("debt_equity", "<", 0.5), _c("market_cap_cr", ">=", 1000)],
+        "sort": "roe", "order": "desc", "limit": 25, "show": ["roe", "profit_margin", "debt_equity"],
+    },
+    "growth": {
+        "description": "Sales and earnings growing fast, with profits (needs fundamentals).",
+        "all": [_c("rev_growth", ">", 15), _c("earn_growth", ">", 15), _c("roe", ">", 10), _c("market_cap_cr", ">=", 1000)],
+        "sort": "earn_growth", "order": "desc", "limit": 25, "show": ["rev_growth", "earn_growth", "pe"],
+    },
+    "dividend": {
+        "description": "Pays a solid dividend (yield above 3%) (needs fundamentals).",
+        "all": [_c("div_yield", ">", 3), _c("market_cap_cr", ">=", 1000)],
+        "sort": "div_yield", "order": "desc", "limit": 25, "show": ["div_yield", "pe", "roe"],
     },
 }
 
@@ -265,6 +285,14 @@ def _describe_node(node: dict) -> str:
     return f'{node["field"]} {op} {right}'
 
 
+def uses_fundamentals(defn: dict) -> bool:
+    """True if the screen filters on or sorts by a fundamentals field."""
+    names = set(FUND_COLUMNS)
+    nodes = list(defn.get("all", [])) + list(defn.get("any", []))
+    fields = {n.get("field") for n in nodes} | {n.get("ref") for n in nodes} | {defn.get("sort")}
+    return bool(fields & names)
+
+
 def describe(defn: dict) -> str:
     parts = []
     if "all" in defn:
@@ -288,8 +316,10 @@ class ScreenResult:
 
 def load_universe(conn: sqlite3.Connection) -> list:
     cur = conn.execute(
-        """SELECT s.ticker, s.name, s.industry, i.*
-           FROM indicators i JOIN symbols s ON s.id = i.symbol_id
+        "SELECT s.ticker, s.name, s.industry, i.*, "
+        + ", ".join(f"f.{c}" for c in FUND_COLUMNS)
+        + """ FROM indicators i JOIN symbols s ON s.id = i.symbol_id
+           LEFT JOIN fundamentals f ON f.symbol_id = s.id
            WHERE s.active = 1"""
     )
     return [dict(r) for r in cur]

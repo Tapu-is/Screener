@@ -69,7 +69,7 @@ class MigrationTests(unittest.TestCase):
         raw.close()
 
         conn = db.connect(path)
-        self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 2)
+        self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], db.SCHEMA_VERSION)
         cols = [r[1] for r in conn.execute("PRAGMA table_info(symbols)")]
         self.assertIn("no_data_since", cols)
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -82,7 +82,7 @@ class MigrationTests(unittest.TestCase):
 
     def test_fresh_database_is_current(self):
         conn = fresh_db()
-        self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 2)
+        self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], db.SCHEMA_VERSION)
         self.assertIn("no_data_since", [r[1] for r in conn.execute("PRAGMA table_info(symbols)")])
 
 

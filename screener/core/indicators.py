@@ -64,7 +64,22 @@ FIELDS = (
     Field("turnover20_cr", "cr", "Value", "Average daily traded value over 20 sessions, in ₹ crore (liquidity)"),
     Field("sessions", "int", "Days", "Number of stored sessions for the stock"),
 )
-FIELD_BY_NAME = {f.name: f for f in FIELDS}
+FUND_FIELDS = (
+    Field("market_cap_cr", "cr", "MCap", "Market value of the company in ₹ crore"),
+    Field("pe", "num", "P/E", "Price to earnings (trailing). Lower can mean cheaper; negative means losses"),
+    Field("pb", "num", "P/B", "Price to book value"),
+    Field("eps", "num", "EPS", "Earnings per share (₹, trailing)"),
+    Field("div_yield", "num", "Div%", "Dividend yield, percent"),
+    Field("roe", "pct0", "ROE", "Return on equity, percent"),
+    Field("roa", "pct0", "ROA", "Return on assets, percent"),
+    Field("profit_margin", "pct0", "Margin", "Net profit margin, percent"),
+    Field("op_margin", "pct0", "OpMrg", "Operating margin, percent"),
+    Field("debt_equity", "num", "D/E", "Debt to equity ratio (0.5 = half as much debt as equity)"),
+    Field("rev_growth", "pct", "RevGr", "Revenue growth, latest year on year, percent"),
+    Field("earn_growth", "pct", "EarnGr", "Earnings growth, latest year on year, percent"),
+)
+FUND_COLUMNS = [f.name for f in FUND_FIELDS]
+FIELD_BY_NAME = {f.name: f for f in FIELDS + FUND_FIELDS}
 COLUMNS = ["as_of", "computed_at"] + [f.name for f in FIELDS]
 
 
