@@ -12,7 +12,7 @@ Prices come from Yahoo Finance and are end-of-day (stored) or delayed by a few m
 
 ```sh
 pkg install git
-git clone https://github.com/<your-username>/<your-repo>.git stk
+git clone https://github.com/Tapu-is/Screener.git
 cd stk
 sh setup.sh
 stk doctor
