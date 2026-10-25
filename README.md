@@ -1,24 +1,102 @@
 # stk - personal NSE/BSE stock screener
 
-A stock tool for your terminal, built for Termux (works anywhere with Python 3.9+).
+A stock tool for the terminal and the browser: live prices, a local price database for the Nifty 500,
+indicators and screens, fundamentals, alerts with Telegram, and a web app. It runs on Android (Termux),
+Windows, macOS and Linux; on iPhone/iPad see below.
 
-- **Phase 1:** `stk quote` - latest price for any NSE/BSE stock.
-- **Phase 2:** a local database of daily prices for the Nifty 500, with `update`, `history`, `info`, `find` and a watchlist.
-- **Phase 3:** indicators (RSI, moving averages, MACD, 52-week, volume) and `stk screen`: built-in, custom and saved screens.
+- **Quotes:** latest price for any NSE/BSE stock, and a live watchlist that refreshes every few seconds.
+- **Database:** daily prices for the Nifty 500 with `update`, `history`, `info`, `find` and a watchlist.
+- **Screens:** RSI, moving averages, MACD, 52-week, volume and fundamentals (P/E, ROE ...) with built-in, custom and saved screens.
+- **Alerts:** price, RSI, big-move and volume alerts to Telegram, plus a daily summary.
+- **Web app:** dashboard, stock charts, screener, watchlist, alerts and data pages (Streamlit).
 
 Prices come from Yahoo Finance and are end-of-day (stored) or delayed by a few minutes (`quote`). This is for information, not for fast trading decisions.
 
-## Install on Termux
+## Install
+
+Pick your device. Everything below is also what `stk doctor` checks afterwards.
+Replace `stk` with `.\bin\stk` on Windows until you add it to your PATH.
+
+### Android (Termux)
+
+1. Install **Termux from F-Droid** (the Play Store version is outdated).
+2. In Termux:
 
 ```sh
 pkg install git
-git clone https://github.com/Tapu-is/Screener.git
+git clone https://github.com/Tapu-is/Screener.git stk
 cd stk
 sh setup.sh
 stk doctor
 ```
 
-## First-time setup (Phase 2)
+Do not run `pip install --upgrade pip` in Termux; it refuses. For file access run `termux-setup-storage` once.
+The web app is too heavy for a phone: run it on a computer and open it from the phone (see "Use the web app from a phone" below).
+
+### Windows
+
+1. Install **Python 3.12 or 3.13** from python.org. Tick **"Add python.exe to PATH"** on the first screen.
+   (Install **Git** from git-scm.com too, or skip it and use GitHub's Code > Download ZIP.)
+2. Open **PowerShell** and run:
+
+```powershell
+git clone https://github.com/Tapu-is/Screener.git C:\stk
+cd C:\stk
+powershell -ExecutionPolicy Bypass -File setup.ps1 -Web
+.\bin\stk doctor
+```
+
+Drop `-Web` if you only want the terminal app. To type just `stk` from any folder: press the Windows key, search
+"environment variables", open **Edit environment variables for your account**, select **Path**, **Edit**, **New**,
+add `C:\stk\bin`, then open a new PowerShell window.
+If Windows opens the Microsoft Store when it can't find Python, install Python from python.org instead and turn off
+Settings > Apps > Advanced app settings > App execution aliases > "python.exe".
+
+### macOS
+
+1. Install Python and Git, either `xcode-select --install` or, with Homebrew, `brew install python git`.
+2. In Terminal:
+
+```sh
+git clone https://github.com/Tapu-is/Screener.git ~/stk
+cd ~/stk
+sh setup.sh --web
+stk doctor
+```
+
+If `stk` is not found, add `export PATH="$HOME/.local/bin:$PATH"` to `~/.zshrc` and open a new Terminal window
+(`setup.sh` prints this reminder). Drop `--web` to skip the web app.
+
+### Linux
+
+Same as macOS. You may need `sudo apt install python3 python3-venv git` first (Debian/Ubuntu).
+
+### iPhone / iPad
+
+iOS does not let apps run a normal Python tool like this one, so there is no full native install. Your options, best first:
+
+1. **Run it on another device and open it in Safari.** On a Mac, PC or Android with the web app installed, run
+   `stk web --network`. It prints a "Network URL" such as `http://192.168.1.20:8501`; open that in Safari while on the
+   same Wi-Fi. Your computer has to stay on.
+2. **Terminal apps on the iPhone.** [a-Shell](https://holzschu.github.io/a-Shell_iOS/) (Python with `pip install` for
+   pure-Python packages) or iSH (a small Linux; `apk add python3 py3-pip git`) can run the terminal commands:
+   download the project, `pip install -r requirements.txt`, then `python -m screener quote TCS`. These are slower and
+   less polished, and the web app will not run there. This route is untested by the author.
+
+### Check it works
+
+```sh
+stk doctor          # checks the data source and the database
+stk quote RELIANCE  # a live price
+```
+
+### Use the web app from a phone
+
+Install the web app on a computer (above), run `stk web --network`, and open the Network URL it prints in your phone's
+browser. Both devices need to be on the same Wi-Fi. Each device keeps its own database; to reuse one, copy `stk.db`
+(see "Where the data lives").
+
+## First-time setup
 
 ```sh
 stk init       # creates the database and downloads the Nifty 500 list
@@ -128,6 +206,25 @@ first filter, not a verdict. `stk daily` refreshes your watchlist's fundamentals
 fetches the stocks side by side, and backs off by itself if the data source pushes back.
 Yahoo's free feed can itself run a few minutes behind the exchange.
 
+### Web app (Phase 6)
+
+A browser version with the same data and database as the terminal app.
+
+```
+pip install -r requirements-web.txt     # installs Streamlit
+stk web                                 # or: streamlit run screener/web/app.py
+```
+
+It opens at http://localhost:8501. Pages: **Dashboard** (indices, live watchlist, market breadth,
+top movers), **Stock** (search, candlestick chart with 20/50/200-day averages and volume, signals,
+fundamentals), **Screener** (built-in, saved or your own filters, CSV download, save), **Watchlist**,
+**Alerts**, and **Data** (load the Nifty 500 list, update prices and fundamentals with a progress bar).
+Click any symbol in a table to open it. Use `stk web --network` to open it from another device on your Wi-Fi.
+
+Run it on a laptop or PC (Streamlit's dependencies are heavy for Termux). The web app keeps its own
+database on that machine; use its Data page to fill it, or copy `stk.db` from your phone
+(`~/.local/share/stk/stk.db`) into the same folder on the computer.
+
 ### More options
 
 `stk quote RELIANCE --bse`, `stk quote 500325` (BSE code), `stk quote ^NSEI`, `stk quote RELIANCE --watch 30` (refresh every 30s), `stk update TCS` (one stock), `stk update --full` (re-download everything), `stk update --years 5`, `stk update --retry-missing` (ask again about stocks Yahoo had no data for), `stk probe` (diagnose Yahoo 429 errors).
@@ -147,8 +244,23 @@ Yahoo's free feed can itself run a few minutes behind the exchange.
 ## Update the app
 
 ```sh
-cd stk && git pull
+cd stk        # your project folder (C:\stk on Windows)
+git pull
 ```
+
+Then, only if `requirements.txt` or `requirements-web.txt` changed, run the setup script again
+(`sh setup.sh` or `setup.ps1`). Your data stays in place.
+
+## Where the data lives
+
+| Device | Folder |
+|---|---|
+| Termux / macOS / Linux | `~/.local/share/stk/` |
+| Windows | `C:\Users\<you>\.local\share\stk\` |
+
+It holds `stk.db` (prices, watchlist, alerts, saved screens) and `telegram.json` (if you set up Telegram).
+Neither is part of the repository. To move your data to another device, copy `stk.db` into the same folder there.
+Set `STK_HOME` to use a different folder.
 
 ## Tests
 
@@ -163,7 +275,7 @@ python -m unittest discover -s tests -v
 3. Indicators and `stk screen` with built-in, custom and saved screens (done)
 4. Home screen, colors, alerts, Telegram and a daily run (done)
 5. Fundamentals (P/E, ROE), live prices, new logo (done; fundamentals source needs a check on your phone)
-6. Streamlit web dashboard (next) sharing the same core
+6. Streamlit web app (done: first version) sharing the same core
 
 ## Disclaimer
 

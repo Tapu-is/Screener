@@ -1,4 +1,24 @@
 #!/usr/bin/env sh
 # Launcher: runs stk from anywhere, e.g.  stk quote RELIANCE
-DIR="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
-PYTHONPATH="$DIR${PYTHONPATH:+:$PYTHONPATH}" exec python -m screener "$@"
+# Follows symlinks by hand (macOS's readlink has no -f on older versions).
+SRC="$0"
+while [ -h "$SRC" ]; do
+  LINK="$(readlink "$SRC")"
+  case "$LINK" in
+    /*) SRC="$LINK" ;;
+    *) SRC="$(dirname "$SRC")/$LINK" ;;
+  esac
+done
+DIR="$(cd "$(dirname "$SRC")/.." && pwd)"
+
+# Use the project's own environment if setup.sh made one (macOS, Linux); Termux uses the system Python.
+if [ -x "$DIR/.venv/bin/python" ]; then
+  PY="$DIR/.venv/bin/python"
+else
+  PY="$(command -v python3 || command -v python)"
+fi
+if [ -z "$PY" ]; then
+  echo "stk: Python was not found. Run: sh setup.sh" >&2
+  exit 1
+fi
+PYTHONPATH="$DIR${PYTHONPATH:+:$PYTHONPATH}" exec "$PY" -m screener "$@"

@@ -661,6 +661,24 @@ def cmd_fundamentals(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_web(args: argparse.Namespace) -> int:
+    import importlib.util
+    import subprocess
+
+    if importlib.util.find_spec("streamlit") is None:
+        console.print("The web app needs Streamlit. Install it with:\n  [bold]pip install -r requirements-web.txt[/bold]")
+        return 1
+    app = Path(__file__).resolve().parents[1] / "web" / "app.py"
+    cmd = [sys.executable, "-m", "streamlit", "run", str(app), "--server.port", str(args.port)]
+    if args.network:
+        cmd += ["--server.address", "0.0.0.0"]
+    console.print(f"Starting the web app on port {args.port} (Ctrl+C to stop)...")
+    try:
+        return subprocess.call(cmd)
+    except KeyboardInterrupt:
+        return 0
+
+
 def cmd_doctor(_: argparse.Namespace) -> int:
     """Quick self-check, handy when something doesn't work on the phone."""
     import platform
@@ -1177,6 +1195,11 @@ def build_parser() -> argparse.ArgumentParser:
     fu.add_argument("--force", action="store_true", help="download again even if fetched this week")
     fu.add_argument("--delay", type=float, default=0.8, help="seconds between requests (default 0.8)")
     fu.set_defaults(func=cmd_fundamentals)
+
+    wb = sub.add_parser("web", help="open the web app in your browser (needs: pip install -r requirements-web.txt)")
+    wb.add_argument("--port", type=int, default=8501)
+    wb.add_argument("--network", action="store_true", help="let other devices on your Wi-Fi open it")
+    wb.set_defaults(func=cmd_web)
 
     d = sub.add_parser("doctor", help="check setup and connectivity")
     d.set_defaults(func=cmd_doctor)

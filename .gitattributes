@@ -1,0 +1,6 @@
+# Keep shell scripts with Unix line endings and Windows scripts with Windows ones,
+# whatever the machine that checks them out.
+*.sh text eol=lf
+bin/stk text eol=lf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

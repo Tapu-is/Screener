@@ -1,6 +1,8 @@
-__pycache__/
-*.pyc
-.venv/
-.cache/
 *.db
+*.log
+*.pyc
+.cache/
 .env
+.venv/
+__pycache__/
+telegram.json
